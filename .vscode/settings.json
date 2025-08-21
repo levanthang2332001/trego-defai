@@ -1,3 +1,4 @@
 {
-  "cSpell.words": ["Tasmil"]
+  "cSpell.words": ["Trego"],
+  "rust-analyzer.linkedProjects": ["server/core-rust/Cargo.toml"]
 }
