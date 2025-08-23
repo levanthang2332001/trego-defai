@@ -4,3 +4,31 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+# gRPC and async runtime
+tonic = "0.9"
+tonic-reflection = "0.9"
+tokio = { version = "1.0", features = ["macros", "rt-multi-thread", "time"] }
+tokio-stream = "0.1"
+prost = "0.11"
+
+# Metrics and observability
+prometheus = "0.13"
+
+# Decimal precision for trading
+rust_decimal = "1.32"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = "0.3"
+
+# Error handling
+anyhow = "1.0"
+
+# Random number generation
+rand = "0.8"
+
+[build-dependencies]
+tonic-build = "0.9"
