@@ -1,0 +1,93 @@
+syntax = "proto3";
+
+package core;
+
+// Trading engine configuration parameters
+message TradingParams {
+  string symbol = 1;
+  double min_spread_ticks = 2;
+  double max_inventory = 3;
+  double risk_sigma_ceiling = 4;
+  double max_daily_dd_pct = 5;
+}
+
+// Risk management parameters
+message RiskParams {
+  double max_leverage = 1;
+  double max_position_size = 2;
+  bool allow_new_orders = 3;
+}
+
+// Command types for engine control
+enum CommandType {
+  START = 0;
+  STOP = 1;
+  FLAT_ALL = 2;
+  PAUSE_NEW = 3;
+  RESUME = 4;
+}
+
+// Engine command
+message EngineCommand {
+  CommandType command = 1;
+  string reason = 2;
+}
+
+// Real-time metrics from the trading engine
+message Metric {
+  int64 timestamp = 1;
+  string symbol = 2;
+  double mid_price = 3;
+  double sigma = 4;
+  double unrealized_pnl = 5;
+  string state = 6;
+  double inventory = 7;
+  int64 heartbeat_counter = 8;
+}
+
+// Request/Response messages
+message SetParamsRequest {
+  TradingParams params = 1;
+}
+
+message SetParamsResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+message UpdateRiskRequest {
+  RiskParams risk_params = 1;
+}
+
+message UpdateRiskResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+message SendCommandRequest {
+  EngineCommand command = 1;
+}
+
+message SendCommandResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+message StreamMetricsRequest {
+  // Empty for now, could add filtering later
+}
+
+// Core trading engine service
+service TradingCore {
+  // Set trading parameters
+  rpc SetParams(SetParamsRequest) returns (SetParamsResponse);
+
+  // Update risk parameters
+  rpc UpdateRisk(UpdateRiskRequest) returns (UpdateRiskResponse);
+
+  // Send control commands
+  rpc SendCommand(SendCommandRequest) returns (SendCommandResponse);
+
+  // Stream real-time metrics
+  rpc StreamMetrics(StreamMetricsRequest) returns (stream Metric);
+}
