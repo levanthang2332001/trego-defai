@@ -38,11 +38,13 @@ message Metric {
   int64 timestamp = 1;
   string symbol = 2;
   double mid_price = 3;
-  double sigma = 4;
-  double unrealized_pnl = 5;
-  string state = 6;
-  double inventory = 7;
-  int64 heartbeat_counter = 8;
+  double bid_price = 4;
+  double ask_price = 5;
+  double spread = 6;        // Bid-ask spread percentage
+  double volume_24h = 7;    // 24h trading volume
+  double price_change_24h = 8;  // 24h price change percentage
+  string state = 9;
+  int64 heartbeat_counter = 10;
 }
 
 // Request/Response messages
@@ -77,8 +79,20 @@ message StreamMetricsRequest {
   // Empty for now, could add filtering later
 }
 
+message TestWebSocketRequest {
+  string address = 1;
+}
+
+message TestWebSocketResponse {
+  bool success = 1;
+  string message = 2;
+}
+
 // Core trading engine service
 service TradingCore {
+  // Test WebSocket connection
+  rpc TestWebSocket(TestWebSocketRequest) returns (TestWebSocketResponse);
+
   // Set trading parameters
   rpc SetParams(SetParamsRequest) returns (SetParamsResponse);
 
