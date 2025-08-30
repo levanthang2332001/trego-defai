@@ -36,5 +36,11 @@ tokio-tungstenite = { version = "0.20", features = ["native-tls"] }
 futures-util = "0.3"
 url = "2.4"
 
+# Date and time
+chrono = { version = "0.4", features = ["serde"] }
+
+# Local dependencies
+data = { path = "crates/data" }
+
 [build-dependencies]
 tonic-build = "0.9"
