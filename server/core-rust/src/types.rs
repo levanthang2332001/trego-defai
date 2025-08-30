@@ -111,12 +111,7 @@ pub struct FundingRate {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BestPrice {
-  pub symbol: String,
-  #[serde(rename = "bestBid")]
-  pub bid: f64,
-  #[serde(rename = "bestAsk")]
-  pub ask: f64,
-  #[serde(rename = "lastPrice")]
-  pub mid_price: f64,
-  pub timestamp: i64,
+  pub market_id: String,
+  pub best_bid: Option<f64>,
+  pub best_ask: Option<f64>,
 }

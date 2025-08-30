@@ -1,0 +1,34 @@
+syntax = "proto3";
+
+package core;
+
+// Request to get market candles
+message GetCandlesRequest {
+  string market_id = 1;
+  string timeframe = 2;  // e.g. "M1", "M5", "H1"
+  int32 count = 3;
+}
+
+// A single candle
+message CandleData {
+  string market_id = 1;
+  string timeframe = 2;
+  int64 start_time = 3;
+  int64 end_time = 4;
+  double open = 5;
+  double high = 6;
+  double low = 7;
+  double close = 8;
+  double volume = 9;
+  uint64 tick_count = 10;
+  double vwap = 11;
+  double spread_avg = 12;
+  double spread_min = 13;
+  double spread_max = 14;
+  bool is_closed = 15;
+}
+
+// Response containing candles
+message GetCandlesResponse {
+  repeated CandleData candles = 1;
+}
