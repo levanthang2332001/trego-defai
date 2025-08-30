@@ -1,13 +1,14 @@
 use std::path::Path;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-  let proto_file = "../proto/core.proto";
+  let proto_files = ["proto/core.proto", "proto/candles.proto"];
 
-  if !Path::new(proto_file).exists() {
-    panic!("Proto file not found: {}", proto_file);
+  for file in &proto_files {
+    if !Path::new(file).exists() {
+      panic!("Proto file not found: {}", file);
+    }
+    println!("cargo:rerun-if-changed={}", file);
   }
-
-  println!("cargo:rerun-if-changed={}", proto_file);
 
   std::env::set_var(
     "PROTOC",
@@ -18,7 +19,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     .build_server(true)
     .build_client(true)
     .file_descriptor_set_path("src/generated/descriptor.bin")
-    .compile(&[proto_file], &["../proto"])?;
+    .compile(&["proto/core.proto", "proto/candles.proto"], &["proto"])?;
 
   Ok(())
 }
