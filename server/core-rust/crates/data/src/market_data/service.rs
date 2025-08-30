@@ -1,0 +1,143 @@
+use super::{
+  orderbook::OrderbookStore,
+  trades::TradeStore,
+  types::{OrderbookLevel, Trade, WsResponse},
+};
+use crate::candles::{
+  store::CandleStore,
+  types::{Tick, TradeSide},
+};
+use std::sync::Arc;
+use tokio::sync::RwLock;
+
+#[derive(Debug)]
+pub struct MarketDataService {
+  orderbook_store: Arc<OrderbookStore>,
+  trade_store: Arc<TradeStore>,
+  candle_store: Arc<CandleStore>,
+}
+
+impl MarketDataService {
+  pub fn new(candle_store: Arc<CandleStore>) -> Self {
+    Self {
+      orderbook_store: Arc::new(OrderbookStore::new()),
+      trade_store: Arc::new(TradeStore::new()),
+      candle_store,
+    }
+  }
+
+  pub async fn process_orderbook(&self, market_id: &str, levels: Vec<OrderbookLevel>) {
+    // Split into bids and asks
+    let (asks, bids): (Vec<_>, Vec<_>) = levels.into_iter().partition(|level| level.is_ask);
+
+    // Create orderbook
+    let orderbook = super::types::Orderbook {
+      market_id: market_id.to_string(),
+      bids,
+      asks,
+    };
+
+    // Update orderbook store
+    self.orderbook_store.update_orderbook(orderbook).await;
+
+    // Create and process ticks for candles
+    let timestamp = chrono::Utc::now();
+
+    // Get best bid/ask
+    let best_bid = self.orderbook_store.get_best_bid(market_id).await;
+    let best_ask = self.orderbook_store.get_best_ask(market_id).await;
+
+    if let (Some(bid), Some(ask)) = (best_bid, best_ask) {
+      // Create tick from bid
+      let tick_bid = Tick {
+        timestamp,
+        market_id: market_id.to_string(),
+        price: bid.price,
+        volume: bid.size_as_f64(),
+        bid: Some(bid.price),
+        ask: Some(ask.price),
+        spread: Some((ask.price - bid.price) / bid.price),
+        side: Some(TradeSide::Sell),
+        sequence: None,
+      };
+
+      // Create tick from ask
+      let tick_ask = Tick {
+        timestamp,
+        market_id: market_id.to_string(),
+        price: ask.price,
+        volume: ask.size_as_f64(),
+        bid: Some(bid.price),
+        ask: Some(ask.price),
+        spread: Some((ask.price - bid.price) / bid.price),
+        side: Some(TradeSide::Buy),
+        sequence: None,
+      };
+
+      // Process both ticks
+      if let Err(e) = self.candle_store.process_tick(&tick_bid).await {
+        tracing::error!("Failed to process bid tick: {}", e);
+      }
+      if let Err(e) = self.candle_store.process_tick(&tick_ask).await {
+        tracing::error!("Failed to process ask tick: {}", e);
+      }
+    }
+  }
+
+  pub async fn process_trade(&self, trade: Trade) {
+    // Update trade store
+    self.trade_store.add_trade(trade.clone()).await;
+
+    // Create and process tick
+    let tick = Tick {
+      timestamp: chrono::DateTime::from_timestamp(trade.timestamp, 0)
+        .unwrap()
+        .into(),
+      market_id: trade.market_id.clone(),
+      price: trade.price_as_f64(),
+      volume: trade.size_as_f64(),
+      bid: None,
+      ask: None,
+      spread: None,
+      side: Some(match trade.order_type {
+        3 | 5 => TradeSide::Buy,  // Market/Limit Buy
+        4 | 6 => TradeSide::Sell, // Market/Limit Sell
+        _ => TradeSide::Unknown,
+      }),
+      sequence: None,
+    };
+
+    if let Err(e) = self.candle_store.process_tick(&tick).await {
+      tracing::error!("Failed to process trade tick: {}", e);
+    }
+  }
+
+  pub async fn handle_ws_message(&self, message: String) -> Result<(), Box<dyn std::error::Error>> {
+
+    // Parse message
+    let response: WsResponse<serde_json::Value> = serde_json::from_str(&message)?;
+
+    match response.message.as_ref() {
+      "orderbook" => {
+        // Parse orderbook data
+        let levels: Vec<OrderbookLevel> = serde_json::from_value(response.data)?;
+        if let Some(first) = levels.first() {
+          let market_id = first.market_id.clone();
+          self.process_orderbook(&market_id, levels).await;
+        }
+      }
+      "recent_trades" => {
+        // Parse trades data
+        let trades: Vec<Trade> = serde_json::from_value(response.data)?;
+        for trade in trades {
+          self.process_trade(trade).await;
+        }
+      }
+      _ => {
+        tracing::warn!("Unknown message type: {}", response.message);
+      }
+    }
+
+    Ok(())
+  }
+}
