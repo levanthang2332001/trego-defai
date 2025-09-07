@@ -8,7 +8,6 @@ use crate::candles::{
   types::{Tick, TradeSide},
 };
 use std::sync::Arc;
-use tokio::sync::RwLock;
 
 #[derive(Debug)]
 pub struct MarketDataService {
@@ -26,7 +25,11 @@ impl MarketDataService {
     }
   }
 
-  pub async fn process_orderbook(&self, market_id: &str, levels: Vec<OrderbookLevel>) {
+  pub async fn process_orderbook(
+    &self,
+    market_id: &str,
+    levels: Vec<OrderbookLevel>,
+  ) -> Option<(f64, f64, f64)> {
     // Split into bids and asks
     let (asks, bids): (Vec<_>, Vec<_>) = levels.into_iter().partition(|level| level.is_ask);
 
@@ -81,7 +84,15 @@ impl MarketDataService {
       if let Err(e) = self.candle_store.process_tick(&tick_ask).await {
         tracing::error!("Failed to process ask tick: {}", e);
       }
+
+      // Calculate volume from orderbook
+      let total_volume = self.orderbook_store.calculate_volume(market_id).await;
+
+      // Return bid, ask, volume for main state update
+      return Some((bid.price, ask.price, total_volume));
     }
+
+    None
   }
 
   pub async fn process_trade(&self, trade: Trade) {
@@ -112,8 +123,28 @@ impl MarketDataService {
     }
   }
 
-  pub async fn handle_ws_message(&self, message: String) -> Result<(), Box<dyn std::error::Error>> {
+  pub async fn get_best_bid(&self, market_id: &str) -> Option<OrderbookLevel> {
+    self.orderbook_store.get_best_bid(market_id).await
+  }
 
+  pub async fn get_best_ask(&self, market_id: &str) -> Option<OrderbookLevel> {
+    self.orderbook_store.get_best_ask(market_id).await
+  }
+
+  pub async fn get_volume(&self, market_id: &str) -> f64 {
+    self.orderbook_store.calculate_volume(market_id).await
+  }
+
+  pub async fn get_volume_24h(&self, market_id: &str) -> f64 {
+    self
+      .trade_store
+      .get_volume(market_id)
+      .await
+      .map(|v| v.volume_24h)
+      .unwrap_or(0.0)
+  }
+
+  pub async fn handle_ws_message(&self, message: String) -> Result<(), Box<dyn std::error::Error>> {
     // Parse message
     let response: WsResponse<serde_json::Value> = serde_json::from_str(&message)?;
 
@@ -129,8 +160,27 @@ impl MarketDataService {
       "recent_trades" => {
         // Parse trades data
         let trades: Vec<Trade> = serde_json::from_value(response.data)?;
-        for trade in trades {
-          self.process_trade(trade).await;
+        tracing::info!("Received {} trades from WebSocket", trades.len());
+
+        for (i, trade) in trades.iter().enumerate() {
+          tracing::info!(
+            "Processing trade {}/{}: market_id={}, price={}, size={}",
+            i + 1,
+            trades.len(),
+            trade.market_id,
+            trade.price,
+            trade.size
+          );
+          match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            tokio::task::block_in_place(|| {
+              tokio::runtime::Handle::current().block_on(async {
+                self.process_trade(trade.clone()).await;
+              })
+            })
+          })) {
+            Ok(_) => tracing::debug!("Trade {} processed successfully", i + 1),
+            Err(e) => tracing::error!("Failed to process trade {}: {:?}", i + 1, e),
+          }
         }
       }
       _ => {

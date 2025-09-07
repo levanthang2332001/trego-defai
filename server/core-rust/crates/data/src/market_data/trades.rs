@@ -28,6 +28,14 @@ impl TradeStore {
   }
 
   pub async fn add_trade(&self, trade: Trade) {
+    tracing::info!(
+      "Adding trade: market_id={}, price={}, size={}, timestamp={}",
+      trade.market_id,
+      trade.price,
+      trade.size,
+      trade.timestamp
+    );
+
     let mut trades = self.trades.write().await;
     let market_trades = trades
       .entry(trade.market_id.clone())
@@ -36,7 +44,18 @@ impl TradeStore {
 
     // Keep only recent trades (e.g., last 24 hours)
     let cutoff = trade.timestamp - (24 * 60 * 60); // 24 hours ago
+    let before_count = market_trades.len();
     market_trades.retain(|t| t.timestamp > cutoff);
+    let after_count = market_trades.len();
+
+    if before_count != after_count {
+      tracing::info!(
+        "Filtered trades: {} -> {} (cutoff: {})",
+        before_count,
+        after_count,
+        cutoff
+      );
+    }
 
     // Update volume metrics
     self.update_volumes(&trade.market_id).await;
@@ -64,17 +83,38 @@ impl TradeStore {
         last_update: now,
       };
 
+      tracing::info!(
+        "Updated volume for {}: 1m={}, 5m={}, 15m={}, 1h={}, 24h={} (from {} trades)",
+        market_id,
+        volume_1m,
+        volume_5m,
+        volume_15m,
+        volume_1h,
+        volume_24h,
+        market_trades.len()
+      );
+
       let mut volumes = self.volumes.write().await;
       volumes.insert(market_id.to_string(), volume);
     }
   }
 
   fn calculate_volume_since(&self, trades: &[Trade], since_timestamp: i64) -> f64 {
-    trades
+    let filtered_trades: Vec<_> = trades
       .iter()
       .filter(|t| t.timestamp >= since_timestamp)
-      .map(|t| t.size_as_f64())
-      .sum()
+      .collect();
+
+    let volume: f64 = filtered_trades.iter().map(|t| t.size_as_f64()).sum();
+
+    tracing::debug!(
+      "calculate_volume_since: {} trades since {}, total volume: {}",
+      filtered_trades.len(),
+      since_timestamp,
+      volume
+    );
+
+    volume
   }
 
   pub async fn get_volume(&self, market_id: &str) -> Option<MarketVolume> {
