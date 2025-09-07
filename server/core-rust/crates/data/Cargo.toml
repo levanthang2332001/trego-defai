@@ -31,3 +31,6 @@ async-trait = "0.1"
 
 # Error handling
 anyhow = "1.0"
+
+# Local dependencies
+types = { path = "../types" }
