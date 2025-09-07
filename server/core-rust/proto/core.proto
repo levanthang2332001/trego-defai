@@ -4,15 +4,6 @@ package core;
 
 import "candles.proto";
 
-// Trading engine configuration parameters
-message TradingParams {
-  string symbol = 1;
-  double min_spread_ticks = 2;
-  double max_inventory = 3;
-  double risk_sigma_ceiling = 4;
-  double max_daily_dd_pct = 5;
-}
-
 // Risk management parameters
 message RiskParams {
   double max_leverage = 1;
@@ -49,9 +40,18 @@ message Metric {
   int64 heartbeat_counter = 10;
 }
 
+message TradingParams {
+  double risk_per_trade = 1;
+  double k_factor = 2;
+  double min_spread= 3;
+  double max_spread= 4;
+  double order_size = 5;
+}
+
 // Request/Response messages
 message SetParamsRequest {
-  TradingParams params = 1;
+  int64 market_id = 1;
+  TradingParams params = 2;
 }
 
 message SetParamsResponse {
