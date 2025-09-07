@@ -1,28 +1,25 @@
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{transport::Server, Request, Response, Status};
 use tonic_reflection::server::Builder as ReflectionBuilder;
-use tracing::{error, info, warn};
+use tracing::{error, info};
 
 use chrono::Utc;
-use futures_util::{SinkExt, StreamExt};
-use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
-use url::Url;
 
 use data::{
   candles::store::{CandleStore, CandleStoreConfig},
   market_data::{MarketDataService, WsRequest, WsTopics},
+  trading::{MarketMaker, ParamsValidator, TradingState},
 };
 
-pub mod generated {
-  tonic::include_proto!("core");
-}
+use types::trading_core_server::{TradingCore, TradingCoreServer};
+use types::*;
 
-use generated::trading_core_server::{TradingCore, TradingCoreServer};
-use generated::*;
+mod websocket;
+use websocket::{ReconnectionConfig, WebSocketManager};
 
 #[derive(Debug, Clone)]
 struct MarketData {
@@ -51,7 +48,7 @@ impl Default for MarketData {
 struct EngineState {
   markets: std::collections::HashMap<String, MarketData>,
   state: String,
-  heartbeat_counter: u64,
+  heartbeat_counter: i64,
 }
 
 impl Default for EngineState {
@@ -76,6 +73,10 @@ pub struct TradingCoreService {
   ws_url: String,
   candle_store: Arc<CandleStore>,
   market_data: Arc<MarketDataService>,
+  trading_state: Arc<TradingState>,
+  market_maker: Arc<MarketMaker>,
+  orderbook_manager: Option<WebSocketManager>,
+  trades_manager: Option<WebSocketManager>,
 }
 
 const MAINNET_WS_URL: &str = "wss://perpetuals-indexer-ws.kana.trade/ws/";
@@ -84,106 +85,76 @@ impl TradingCoreService {
   pub fn new() -> Self {
     let config = CandleStoreConfig::default();
     let candle_store = Arc::new(CandleStore::new(config));
+    let trading_state = Arc::new(TradingState::new());
+    let market_maker = Arc::new(MarketMaker::new(trading_state.clone()));
+
+    // Start periodic candle closure task
+    CandleStore::start_periodic_closure(candle_store.clone());
 
     Self {
       state: Arc::new(RwLock::new(EngineState::default())),
       ws_url: MAINNET_WS_URL.to_string(),
       candle_store: candle_store.clone(),
       market_data: Arc::new(MarketDataService::new(candle_store)),
+      trading_state,
+      market_maker,
+      orderbook_manager: None,
+      trades_manager: None,
     }
   }
 
-  async fn connect_market_data(&self, market_id: &str) -> Result<()> {
-    let url =
-      Url::parse(&self.ws_url).map_err(|e| anyhow!("Failed to parse WebSocket URL: {}", e))?;
+  pub async fn update_market_data(&self, market_id: &str, bid: f64, ask: f64, volume: f64) {
+    let mut state = self.state.write().await;
+    if let Some(market) = state.markets.get_mut(market_id) {
+      market.bid_price = bid;
+      market.ask_price = ask;
+      market.mid_price = (bid + ask) / 2.0;
+      market.spread = ((ask - bid) / market.mid_price) * 100.0; // Percentage
+      market.volume_24h = volume;
+    }
+  }
 
-    // Connect orderbook websocket
-    let (ws_stream, _) = connect_async(url.clone())
-      .await
-      .map_err(|e| anyhow!("Failed to connect to WebSocket: {}", e))?;
+  pub async fn connect_market_data(&self, market_id: &str) -> Result<()> {
+    let reconnection_config = ReconnectionConfig {
+      initial_delay_ms: 1000,
+      max_delay_ms: 30000,
+      max_attempts: None, // Infinite attempts
+      backoff_multiplier: 2.0,
+    };
 
-    info!("Orderbook WebSocket connected successfully");
+    // Create orderbook manager
+    let orderbook_manager = WebSocketManager::new(
+      self.ws_url.clone(),
+      reconnection_config.clone(),
+      self.market_data.clone(),
+    );
 
-    let (mut write, mut read) = ws_stream.split();
+    // Create trades manager
+    let trades_manager = WebSocketManager::new(
+      self.ws_url.clone(),
+      reconnection_config,
+      self.market_data.clone(),
+    );
 
-    // Subscribe to orderbook
-    let orderbook_req = WsRequest {
+    // Start persistent orderbook connection
+    let orderbook_request = WsRequest {
       topic: WsTopics::Orderbook,
       market_id: market_id.to_string(),
     };
 
-    write
-      .send(Message::Text(serde_json::to_string(&orderbook_req)?))
-      .await
-      .map_err(|e| anyhow!("Failed to subscribe to orderbook: {}", e))?;
+    info!("Starting persistent orderbook WebSocket connection for market {}", market_id);
+    orderbook_manager.start_persistent_connection(orderbook_request).await;
 
-    // Connect trades websocket
-    let (ws_stream2, _) = connect_async(url)
-      .await
-      .map_err(|e| anyhow!("Failed to connect to WebSocket: {}", e))?;
-
-    info!("Trades WebSocket connected successfully");
-
-    let (mut write2, mut read2) = ws_stream2.split();
-
-    // Subscribe to trades
-    let trades_req = WsRequest {
+    // Start persistent trades connection
+    let trades_request = WsRequest {
       topic: WsTopics::RecentTrades,
       market_id: market_id.to_string(),
     };
 
-    write2
-      .send(Message::Text(serde_json::to_string(&trades_req)?))
-      .await
-      .map_err(|e| anyhow!("Failed to subscribe to trades: {}", e))?;
+    info!("Starting persistent trades WebSocket connection for market {}", market_id);
+    trades_manager.start_persistent_connection(trades_request).await;
 
-    let market_data1 = Arc::clone(&self.market_data);
-    let market_data2 = Arc::clone(&self.market_data);
-
-    // Handle orderbook messages
-    tokio::spawn(async move {
-      while let Some(msg) = read.next().await {
-        match msg {
-          Ok(Message::Text(text)) => {
-            if let Err(e) = market_data1.handle_ws_message(text).await {
-              error!("Failed to handle orderbook message: {}", e);
-            }
-          }
-          Ok(Message::Close(frame)) => {
-            info!("Orderbook WebSocket closed: {:?}", frame);
-            break;
-          }
-          Err(e) => {
-            error!("Orderbook WebSocket error: {}", e);
-            break;
-          }
-          _ => (),
-        }
-      }
-    });
-
-    // Handle trades messages
-    tokio::spawn(async move {
-      while let Some(msg) = read2.next().await {
-        match msg {
-          Ok(Message::Text(text)) => {
-            if let Err(e) = market_data2.handle_ws_message(text).await {
-              error!("Failed to handle trades message: {}", e);
-            }
-          }
-          Ok(Message::Close(frame)) => {
-            info!("Trades WebSocket closed: {:?}", frame);
-            break;
-          }
-          Err(e) => {
-            error!("Trades WebSocket error: {}", e);
-            break;
-          }
-          _ => (),
-        }
-      }
-    });
-
+    info!("Market data connections initialized with automatic reconnection");
     Ok(())
   }
 }
@@ -201,12 +172,18 @@ impl TradingCore for TradingCoreService {
         &req.market_id,
         match req.timeframe.as_str() {
           "1m" | "M1" => data::candles::types::TimeFrame::M1,
+          "3m" | "M3" => data::candles::types::TimeFrame::M3,
           "5m" | "M5" => data::candles::types::TimeFrame::M5,
           "15m" | "M15" => data::candles::types::TimeFrame::M15,
           "30m" | "M30" => data::candles::types::TimeFrame::M30,
           "1h" | "H1" => data::candles::types::TimeFrame::H1,
+          "2h" | "H2" => data::candles::types::TimeFrame::H2,
           "4h" | "H4" => data::candles::types::TimeFrame::H4,
+          "6h" | "H6" => data::candles::types::TimeFrame::H6,
+          "12h" | "H12" => data::candles::types::TimeFrame::H12,
           "1d" | "D1" => data::candles::types::TimeFrame::D1,
+          "1w" | "W1" => data::candles::types::TimeFrame::W1,
+          "1M" | "MN1" => data::candles::types::TimeFrame::MN1,
           _ => return Err(Status::invalid_argument("Invalid timeframe")),
         },
         req.count as usize,
@@ -257,9 +234,57 @@ impl TradingCore for TradingCoreService {
   // Unimplemented methods with default responses
   async fn set_params(
     &self,
-    _: Request<SetParamsRequest>,
+    request: Request<SetParamsRequest>,
   ) -> Result<Response<SetParamsResponse>, Status> {
-    Err(Status::unimplemented("Not implemented"))
+    let req = request.into_inner();
+
+    // Check if params exists
+    let params = match req.params {
+      Some(p) => p,
+      None => {
+        return Ok(Response::new(SetParamsResponse {
+          success: false,
+          message: "No parameters provided".to_string(),
+        }))
+      }
+    };
+
+    // Validate parameters
+    if let Err(e) = ParamsValidator::validate_params(&params) {
+      return Ok(Response::new(SetParamsResponse {
+        success: false,
+        message: format!("Invalid parameters: {} - {}", e.field, e.message),
+      }));
+    }
+
+    // Update trading state
+    if let Err(e) = self
+      .trading_state
+      .update_params(req.market_id, params.clone())
+      .await
+    {
+      return Ok(Response::new(SetParamsResponse {
+        success: false,
+        message: format!("Failed to update parameters: {}", e),
+      }));
+    }
+
+    // Recalculate quotes
+    if let Err(e) = self
+      .market_maker
+      .recalculate_quotes(req.market_id, &params)
+      .await
+    {
+      return Ok(Response::new(SetParamsResponse {
+        success: false,
+        message: format!("Failed to recalculate quotes: {}", e),
+      }));
+    }
+
+    Ok(Response::new(SetParamsResponse {
+      success: true,
+      message: "Parameters updated successfully".to_string(),
+    }))
   }
 
   async fn update_risk(
@@ -282,7 +307,60 @@ impl TradingCore for TradingCoreService {
     &self,
     _: Request<StreamMetricsRequest>,
   ) -> Result<Response<Self::StreamMetricsStream>, Status> {
-    Err(Status::unimplemented("Not implemented"))
+    let (tx, rx) = tokio::sync::mpsc::channel(100);
+    let state = self.state.clone();
+    let market_data = self.market_data.clone();
+
+    // Spawn background task to send metrics
+    tokio::spawn(async move {
+      let mut interval = tokio::time::interval(Duration::from_secs(2));
+      loop {
+        interval.tick().await;
+
+        // Get engine state and increment heartbeat
+        let mut state = state.write().await;
+        state.heartbeat_counter += 1;
+
+        // Log heartbeat every 30 seconds (15 ticks at 2s interval)
+        if state.heartbeat_counter % 15 == 0 {
+          info!("Server heartbeat: {}", state.heartbeat_counter);
+        }
+
+        // Get real market data from orderbook
+        let best_bid = market_data.get_best_bid("15").await;
+        let best_ask = market_data.get_best_ask("15").await;
+        let volume_24h = market_data.get_volume_24h("15").await;
+
+        let (bid_price, ask_price, mid_price, spread) =
+          if let (Some(bid), Some(ask)) = (best_bid, best_ask) {
+            let mid = (bid.price + ask.price) / 2.0;
+            let spread_pct = ((ask.price - bid.price) / mid) * 100.0;
+            (bid.price, ask.price, mid, spread_pct)
+          } else {
+            (0.0, 0.0, 0.0, 0.0)
+          };
+
+        let metric = Metric {
+          timestamp: Utc::now().timestamp(),
+          symbol: "BTC".to_string(),
+          mid_price,
+          bid_price,
+          ask_price,
+          spread,
+          volume_24h: volume_24h,
+          price_change_24h: 0.0, // TODO: Calculate from historical data
+          state: state.state.clone(),
+          heartbeat_counter: state.heartbeat_counter,
+        };
+
+        info!("Sending metric: {:?}", metric);
+        if tx.send(Ok(metric)).await.is_err() {
+          break;
+        }
+      }
+    });
+
+    Ok(Response::new(ReceiverStream::new(rx)))
   }
 }
 
