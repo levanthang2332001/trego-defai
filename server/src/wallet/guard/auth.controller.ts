@@ -5,16 +5,15 @@ import {
   Body,
   Query,
   UnauthorizedException,
-  // UseGuards,
   Res,
 } from '@nestjs/common';
 import * as forge from 'node-forge';
 import { sign, Secret, SignOptions } from 'jsonwebtoken';
 import * as dotenv from 'dotenv';
-import { AuthApiDocs } from '../../chat/docs/auth/auth-api.docs';
+import { AuthApiDocs } from './docs/auth-api.docs';
 import { ApiTags } from '@nestjs/swagger';
-import { RedisCacheService } from 'src/redis/services/redisCacheService';
-import { AuthService } from './service/auth.service';
+import { RedisCacheService } from 'src/database/redis/services/redisCacheService';
+import { AuthService } from './auth.service';
 import { Response } from 'express';
 dotenv.config();
 
@@ -72,7 +71,7 @@ export class AuthController {
       return {
         success: true,
         nonce: nonceHex,
-        message: `Welcome to Trego Defai!Please sign this message to authenticate.Nonce: ${nonceHex}`,
+        message: `Welcome to DeFai! Please sign this message to authenticate.Nonce: ${nonceHex}`,
       };
     } catch (error) {
       console.error('Error in getNonce:', error);

@@ -1,11 +1,11 @@
 /* eslint-disable @typescript-eslint/require-await */
 import { Body, Controller, Post, UseGuards } from '@nestjs/common';
 import { JwtAuthGuard } from '../wallet/guard/jwt-auth.guard';
-import { handleAction } from './actions';
 import { ChatApiDocs } from './docs/chat-api.docs';
 import { ChatRequestDto, ChatResponseDto } from './dto/chat.dto';
 import { MessageHistoryEntry } from './entities/chat.entity';
 import { IntentService } from './services/intent.service';
+import { handleAction } from './ai-thinking';
 
 @Controller('chat')
 export class ChatController {

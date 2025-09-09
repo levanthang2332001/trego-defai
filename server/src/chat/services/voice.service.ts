@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import * as fs from 'fs';
-import { LoggerService } from 'src/chat/services/logger.service';
+import { LoggerService } from 'src/common/logger.service';
 
 @Injectable()
 export class VoiceService {
@@ -46,7 +46,7 @@ export class VoiceService {
 
       return data?.text;
     } catch (error) {
-      this.logger.error('Failed to transcribe audio', error);
+      this.logger.error('Failed to transcribe audio', error as string);
       throw error;
     }
   }

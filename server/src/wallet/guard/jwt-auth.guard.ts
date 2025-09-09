@@ -35,7 +35,10 @@ export class JwtAuthGuard implements CanActivate {
       request.user = payload;
       return true;
     } catch (error) {
-      throw new UnauthorizedException('Token verification failed', error);
+      throw new UnauthorizedException(
+        'Token verification failed',
+        error as string,
+      );
     }
   }
 

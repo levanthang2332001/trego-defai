@@ -9,10 +9,7 @@ import {
 } from '@aptos-labs/ts-sdk';
 
 // import { ConfigService } from '@nestjs/config';
-import {
-  checkCoinStoreRegistered,
-  registerCoinStore,
-} from '../liquidswap/coinstore';
+import { checkCoinStoreRegistered, registerCoinStore } from './coinstore';
 
 import {
   fetchStargateQuote,
@@ -33,9 +30,6 @@ export interface BridgeQuoteRequest {
 
 export interface BridgeQuoteResponse {
   quote: StargateQuote;
-  // estimatedGas: string;
-  // estimatedTime: string;
-  // warnings: string[];
 }
 
 export interface BridgeTransaction {
@@ -109,7 +103,7 @@ const serializeArgs = (args: any[], quote: StargateQuote): any[] => {
       ) {
         let result = 0n;
         for (let i = 0; i < 8; i++) {
-          result += BigInt(arg.value.value[i]) << BigInt(i * 8);
+          result += BigInt(arg.value.value[i] as number) << BigInt(i * 8);
         }
         return result.toString();
       }
@@ -180,7 +174,7 @@ export const executeBridgeFromAptos = async (
     const moduleNameStr = entryFunction.module_name.name.identifier;
     const functionNameStr = entryFunction.function_name.identifier;
 
-    const serializedArgs = serializeArgs(entryFunction.args, quote);
+    const serializedArgs = serializeArgs(entryFunction.args as any[], quote);
 
     const isCoinStoreRegistered = await checkCoinStoreRegistered(
       aptos,

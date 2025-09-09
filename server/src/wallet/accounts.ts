@@ -5,7 +5,7 @@ import {
   PrivateKey,
   PrivateKeyVariants,
 } from '@aptos-labs/ts-sdk';
-import { SupabaseClient, VaultSupabase } from '../supabase/index';
+import { SupabaseClient, VaultSupabase } from '../database/supabase/index';
 import { IAccount } from './entities/account.entities';
 import { Decrypt, Encrypt } from '../utils/index';
 dotenv.config();

@@ -1,10 +1,10 @@
 import { HumanMessage, SystemMessage } from '@langchain/core/messages';
 import { ChatOpenAI } from '@langchain/openai';
 import { Injectable } from '@nestjs/common';
-import { LoggerService } from 'src/chat/services/logger.service';
+import { LoggerService } from 'src/common/logger.service';
 import { clearResponse } from 'src/utils/function';
-import { actionRegistry } from '../actions';
 import { ActionType, DeFiIntent, ParamsType } from '../entities/intent.entity';
+import { actionRegistry } from '../ai-thinking';
 
 @Injectable()
 export class IntentService {
@@ -93,7 +93,7 @@ export class IntentService {
       this.logger.log(`Extracted intent: ${JSON.stringify(validatedIntent)}`);
       return validatedIntent;
     } catch (error) {
-      this.logger.error('Failed to extract intent', error);
+      this.logger.error('Failed to extract intent', error as string);
       throw error;
     }
   }

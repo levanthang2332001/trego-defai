@@ -1,18 +1,5 @@
 import { ApiProperty } from '@nestjs/swagger';
-import {
-  IsString,
-  IsNotEmpty,
-  MinLength,
-  IsNumber,
-  Min,
-  IsEnum,
-} from 'class-validator';
-import { DeFiIntentSchema } from '../docs/schemas';
-
-enum CurveType {
-  STABLE = 'stable',
-  UNCORRELATED = 'uncorrelated',
-}
+import { IsNotEmpty, IsString, MinLength } from 'class-validator';
 
 export class ChatRequestDto {
   @ApiProperty({
@@ -35,53 +22,6 @@ export class ChatRequestDto {
   content: string;
 }
 
-export class PreswapRequestDto {
-  // @ApiProperty({
-  //   example: '0x1234567890abcdef...',
-  //   description: 'User wallet address',
-  //   minLength: 1,
-  // })
-  @IsString()
-  @IsNotEmpty()
-  user_address: string;
-
-  @IsString()
-  @IsNotEmpty()
-  @MinLength(1)
-  fromToken: string;
-
-  @IsString()
-  @IsNotEmpty()
-  @MinLength(1)
-  toToken: string;
-
-  @IsNumber()
-  @IsNotEmpty()
-  @Min(0)
-  fromAmount: number;
-
-  @IsNumber()
-  @IsNotEmpty()
-  @Min(0)
-  toAmount: number;
-
-  @IsString()
-  @IsNotEmpty()
-  @MinLength(1)
-  interactiveToken: string;
-
-  @IsEnum(CurveType, {
-    message: 'Invalid curve type',
-  })
-  @IsNotEmpty()
-  curveType: CurveType;
-
-  @IsNumber()
-  @IsNotEmpty()
-  @Min(0)
-  version: 0 | 0.5;
-}
-
 export class ChatResponseDto {
   @ApiProperty({
     example: 'Action processed successfully',
@@ -91,10 +31,9 @@ export class ChatResponseDto {
 
   @ApiProperty({
     description: 'Extracted DeFi intent from the message',
-    type: DeFiIntentSchema,
     required: false,
   })
-  intent?: DeFiIntentSchema;
+  intent?: any;
 
   @ApiProperty({
     example: {

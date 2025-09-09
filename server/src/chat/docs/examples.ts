@@ -29,7 +29,38 @@ export const ChatExamples = {
 
   responses: {
     swapSuccess: {
-      message: 'Action processed successfully',
+      message:
+        '<h2 class="text-lg font-semibold mb-2">Swap Quotes Ready! 💱</h2>\n          <div class="space-y-3">\n            \n            <div class="bg-gray-50 p-4 rounded-lg">\n              <div class="flex justify-between items-center mb-2">\n                <span class="font-medium">From: APT</span>\n                <span class="text-lg font-bold">10000</span>\n              </div>\n              <div class="flex justify-between items-center">\n                <span class="font-medium">To: USDT</span>\n                <span class="text-lg font-bold text-green-600">3590</span>\n              </div>\n              <div class="flex justify-between text-sm text-gray-600 mt-2">\n                <span>Value: $0.00 → $0.00</span>\n                <span>Provider: HYPERION</span>\n              </div>\n              <div class="text-sm text-gray-500">Slippage: 0.5%</div>\n            </div>\n            <div class="bg-gray-50 p-4 rounded-lg">\n              <div class="flex justify-between items-center mb-2">\n                <span class="font-medium">From: APT</span>\n                <span class="text-lg font-bold">0.0001</span>\n              </div>\n              <div class="flex justify-between items-center">\n                <span class="font-medium">To: USDT</span>\n                <span class="text-lg font-bold text-green-600">0.000434</span>\n              </div>\n              <div class="flex justify-between text-sm text-gray-600 mt-2">\n                <span>Value: $0.00 → $0.00</span>\n                <span>Provider: PANORA</span>\n              </div>\n              <div class="text-sm text-gray-500">Slippage: 0.5%</div>\n            </div>\n          </div>\n          <div class="mt-4 text-sm">\n            Best by output: <span class="font-semibold">HYPERION</span> (3590)\n          </div>',
+      success: true,
+      data: [
+        {
+          provider: 'hyperion',
+          fromToken: 'APT',
+          toToken: 'USDT',
+          fromAmount: '10000',
+          toAmount: '3590',
+          fromAmountUsd: 0.0001,
+          toAmountUsd: 0.00359,
+          slippage: 0.5,
+          path: [
+            '0x692ba87730279862aa1a93b5fef9a175ea0cccc1f29dfc84d3ec7fbe1561aef3',
+            '0x7a4a0f042d6198677f7ca5d169c1d9b882c0e4e3fbfa64408b34852304048b22',
+          ],
+          timestamp: '2025-09-04T09:48:25.348Z',
+        },
+        {
+          provider: 'panora',
+          fromToken: 'APT',
+          toToken: 'USDT',
+          fromAmount: '0.0001',
+          toAmount: '0.000434',
+          fromAmountUsd: 0.00042848,
+          toAmountUsd: 0.0004341,
+          slippage: 0.5,
+          path: [],
+          timestamp: '2025-09-04T09:48:25.348Z',
+        },
+      ],
       intent: {
         actionType: 'swap',
         params: {
@@ -40,12 +71,6 @@ export const ChatExamples = {
         confidence: 0.95,
         missingFields: [],
         context: 'User wants to swap USDT for ETH',
-      },
-      data: {
-        transactionHash: '0x1234567890abcdef...',
-        estimatedGas: '150000',
-        slippage: '0.5%',
-        estimatedOutput: '0.045 ETH',
       },
     },
     liquiditySuccess: {

@@ -1,47 +1,66 @@
-# Trego Defai 
+# DeFai Agent 
 
-A sophisticated AI-powered trading platform built on Aptos, enabling seamless token swaps and market evaluation through intelligent agent automation.
+A sophisticated AI-powered DeFi platform built on Aptos blockchain, enabling seamless token swaps, liquidity provision, staking, lending, and intelligent trading through conversational AI interactions.
 
 ## 🚀 Features
 
-- **🤖 AI-Powered Trading**: Automated trading decisions based on market analysis and predictive models
-- **🔄 Token Swaps**: Seamless cross-chain token exchanges with optimized routing
-- **📊 Market Evaluation**: Real-time market analysis and price predictions
-- **🛡️ Risk Management**: Automated risk assessment and position sizing
-- **📈 Portfolio Optimization**: AI-driven portfolio rebalancing and strategy optimization
-- **📉 Trending Analysis**: Real-time market trends and insights
-- **💱 DeFi Integration**: Automated DeFi strategy execution and optimization
-- **⚙️ User Settings**: Customizable trading preferences and notifications
-- **❓ Help Center**: Comprehensive documentation and support resources
+- **🤖 AI-Powered Trading**: Intelligent conversational agent for DeFi operations with intent recognition
+- **🔄 Token Swaps**: Multi-protocol token exchanges (Hyperion, Panora, Liquidswap)
+- **💧 Liquidity Management**: Add and remove liquidity across various protocols
+- **🏛️ Lending & Borrowing**: Supply, withdraw, borrow, and repay operations
+- **🥩 Staking**: Stake tokens and claim rewards with automated management
+- **🌉 Cross-Chain Bridge**: Stargate protocol integration for bridging assets
+- **💱 Voice Interactions**: Voice-enabled trading and DeFi operations
+- **🔐 Secure Authentication**: JWT-based authentication with wallet integration
+- **📊 Real-time Analytics**: Market data and portfolio tracking
 
 ## 🛠️ Technical Stack
 
-- **🌐 Frontend**: Next.js 14, TypeScript, Tailwind CSS
-- **🧠 AI Integration**: Custom AI agents for market analysis and trading decisions
-- **⛓️ Blockchain**: Hyperliquid protocol integration
-- **📦 State Management**: React Query, Zustand
-- **🎨 UI Components**: Shadcn UI, Radix
-- **✅ Validation**: Zod
-- **🧪 Testing**: Jest, React Testing Library
-- **🛣️ Routing**: Next.js App Router
-- **🔐 Authentication**: Thirdweb wallet integration
-- **🎭 Styling**: Tailwind CSS with custom animations
-- **⚡ Performance**: React Server Components, Suspense boundaries
+### Backend
+- **🏗️ Framework**: NestJS with TypeScript
+- **⛓️ Blockchain**: Aptos blockchain integration
+- **🤖 AI**: LangChain with OpenAI for intelligent intent processing
+- **💾 Database**: Supabase with Redis caching
+- **🔌 Protocols**: Hyperion, Panora, Liquidswap, Stargate, Pyth Network
+- **📡 API**: RESTful APIs with Swagger documentation
+- **🔐 Auth**: JWT authentication with Passport
+- **🧪 Testing**: Jest with comprehensive test coverage
 
 ## 🔧 Environment Variables
 
-Rename a `.env.development` file to `.env` file (both client & server folder)
+Create a `.env` file in the server folder with required environment variables.
 
-## 🚀 Run Commands
+## 🚀 Getting Started
 
-#### Client ([Staging]())
+### Server Setup ([📚 API Documentation](http://localhost:5000/api/docs))
 
-```sh
-cd client && yarn && yarn dev
+```bash
+cd server
+pnpm install
+pnpm start:dev
 ```
 
-#### Server ([📚 Document](http://localhost:5000/api/docs))
+The server will be available at `http://localhost:5000` with API documentation at `/api/docs`.
 
-```sh
-cd server && pnpm i && pnpm start:dev
+## 📁 Project Structure
+
 ```
+defai/
+├── server/                 # NestJS backend application
+│   ├── src/
+│   │   ├── actions/        # Protocol-specific trading actions
+│   │   ├── chat/          # AI chat and intent processing
+│   │   ├── database/      # Database connections (Supabase, Redis)
+│   │   ├── tools/         # Protocol SDKs and utilities
+│   │   └── wallet/        # Authentication and wallet management
+│   └── package.json
+└── README.md
+```
+
+## 🔌 Supported Protocols
+
+- **Hyperion**: DEX aggregator for optimal swap routing
+- **Panora**: Advanced trading and liquidity protocols
+- **Liquidswap**: Aptos-native AMM protocol
+- **Stargate**: Cross-chain bridge protocol
+- **Pyth Network**: Real-time price feeds
