@@ -7,7 +7,6 @@ use std::collections::VecDeque;
 pub struct CandleRingBuffer {
   buffer: VecDeque<Candle>,
   capacity: usize,
-  write_index: usize,
   total_written: u64,
 }
 
@@ -17,7 +16,6 @@ impl CandleRingBuffer {
     Self {
       buffer: VecDeque::with_capacity(capacity),
       capacity,
-      write_index: 0,
       total_written: 0,
     }
   }
@@ -28,22 +26,13 @@ impl CandleRingBuffer {
       self.buffer.pop_front();
     }
     self.buffer.push_back(candle);
-    self.write_index = (self.write_index + 1) % self.capacity;
     self.total_written += 1;
   }
 
   /// Get the latest N candles in chronological order
   pub fn get_latest(&self, count: usize) -> Vec<&Candle> {
-    let take_count = count.min(self.buffer.len());
-    self
-      .buffer
-      .iter()
-      .rev()
-      .take(take_count)
-      .collect::<Vec<_>>()
-      .into_iter()
-      .rev()
-      .collect()
+    let start = self.buffer.len().saturating_sub(count);
+    self.buffer.range(start..).collect()
   }
 
   /// Get all candles in the buffer
@@ -57,21 +46,6 @@ impl CandleRingBuffer {
       .buffer
       .iter()
       .filter(|c| c.start_time >= start && c.start_time < end)
-      .collect()
-  }
-
-  /// Get candles within a time range with limit
-  pub fn get_range_with_limit(
-    &self,
-    start: DateTime<Utc>,
-    end: DateTime<Utc>,
-    limit: usize,
-  ) -> Vec<&Candle> {
-    self
-      .buffer
-      .iter()
-      .filter(|c| c.start_time >= start && c.start_time < end)
-      .take(limit)
       .collect()
   }
 
@@ -131,32 +105,29 @@ impl CandleRingBuffer {
 
   /// Get time range covered by the buffer
   pub fn time_range(&self) -> Option<(DateTime<Utc>, DateTime<Utc>)> {
-    if let (Some(first), Some(last)) = (self.get_first(), self.get_last()) {
-      Some((first.start_time, last.end_time))
-    } else {
-      None
+    match (self.buffer.front(), self.buffer.back()) {
+      (Some(first), Some(last)) => Some((first.start_time, last.end_time)),
+      _ => None,
     }
   }
 
   /// Clear all candles from buffer
   pub fn clear(&mut self) {
     self.buffer.clear();
-    self.write_index = 0;
   }
 
   /// Shrink buffer capacity (removes oldest candles if necessary)
   pub fn shrink_to(&mut self, new_capacity: usize) {
     if new_capacity < self.capacity {
-      while self.buffer.len() > new_capacity {
-        self.buffer.pop_front();
-      }
+      let excess = self.buffer.len().saturating_sub(new_capacity);
+      self.buffer.drain(..excess);
+
       self.buffer.shrink_to_fit();
       self.capacity = new_capacity;
-      self.write_index = self.write_index.min(new_capacity);
     }
   }
 
-  /// Get buffer statistics
+  /// Get buffer statisticslet
   pub fn statistics(&self) -> RingBufferStats {
     let time_range = self.time_range();
     RingBufferStats {
@@ -167,25 +138,6 @@ impl CandleRingBuffer {
       oldest_timestamp: time_range.map(|(start, _)| start),
       newest_timestamp: time_range.map(|(_, end)| end),
       utilization_pct: (self.len() as f64 / self.capacity as f64) * 100.0,
-    }
-  }
-
-  /// Compact buffer by removing low-quality candles if over capacity
-  pub fn compact_by_quality(&mut self, min_quality_score: f64) {
-    if self.len() < self.capacity {
-      return;
-    }
-
-    let mut indices_to_remove = Vec::new();
-    for (i, candle) in self.buffer.iter().enumerate() {
-      if candle.metadata.quality_score < min_quality_score {
-        indices_to_remove.push(i);
-      }
-    }
-
-    // Remove from back to front to preserve indices
-    for &i in indices_to_remove.iter().rev() {
-      self.buffer.remove(i);
     }
   }
 

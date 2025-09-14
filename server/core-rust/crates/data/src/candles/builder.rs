@@ -185,16 +185,20 @@ impl CandleBuilder {
     let volatility_z_score = self.calculate_volatility_z_score();
 
     let metadata = CandleMetadata {
+      created_timestamp: self.created_at.timestamp(),
       created_at: self.created_at,
       source,
       quality_score,
       gap_detected,
       volatility_z_score,
+      ws_sequence: None,
     };
 
     Candle {
       market_id: self.market_id,
       timeframe: self.timeframe,
+      start_timestamp: self.start_time.timestamp(),
+      end_timestamp: end_time.timestamp(),
       start_time: self.start_time,
       end_time,
       open: self.open.unwrap_or(self.close),

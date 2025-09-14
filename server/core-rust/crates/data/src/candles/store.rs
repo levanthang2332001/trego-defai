@@ -1,4 +1,4 @@
-use super::{builder::*, events::*, metrics::*, types::*};
+use super::{builder::*, database::*, events::*, metrics::*, types::*};
 use crate::candles::ring_buffer::{CandleRingBuffer, RingBufferStats};
 use tracing::info;
 
@@ -57,7 +57,7 @@ impl Default for CandleStoreConfig {
   }
 }
 
-/// Main in-memory candle store
+/// Main in-memory candle store with PostgreSQL persistence
 #[derive(Debug)]
 pub struct CandleStore {
   // market_id -> timeframe -> ring buffer
@@ -74,9 +74,22 @@ pub struct CandleStore {
 
   // Event publishers
   event_publishers: Vec<Arc<dyn CandleEventPublisher>>,
+
+  // Database persistence layer
+  database: Option<Arc<CandleDatabase>>,
 }
 
 impl CandleStore {
+  /// Helper method to get or create market builders for a given market_id
+  fn get_or_create_market_builders<'a>(
+    builders: &'a mut HashMap<String, HashMap<TimeFrame, CandleBuilder>>,
+    market_id: &str,
+  ) -> &'a mut HashMap<TimeFrame, CandleBuilder> {
+    builders
+      .entry(market_id.to_string())
+      .or_insert_with(HashMap::new)
+  }
+
   /// Create a new candle store with configuration
   pub fn new(config: CandleStoreConfig) -> Self {
     Self {
@@ -85,6 +98,19 @@ impl CandleStore {
       config,
       metrics: Arc::new(CandleMetrics::new()),
       event_publishers: Vec::new(),
+      database: None,
+    }
+  }
+
+  /// Create a new candle store with PostgreSQL database
+  pub fn new_with_database(config: CandleStoreConfig, database: Arc<CandleDatabase>) -> Self {
+    Self {
+      candles: Arc::new(RwLock::new(HashMap::new())),
+      builders: Arc::new(Mutex::new(HashMap::new())),
+      config,
+      metrics: Arc::new(CandleMetrics::new()),
+      event_publishers: Vec::new(),
+      database: Some(database),
     }
   }
 
@@ -138,65 +164,82 @@ impl CandleStore {
   ) -> Result<Option<Candle>, CandleError> {
     let candle_start = timeframe.round_timestamp(tick.timestamp);
 
-    // Get or create builder and process tick
-    let (closed_candle, needs_new_candle) = {
-      let mut builders = self.builders.lock();
-      let market_builders = builders
-        .entry(tick.market_id.clone())
-        .or_insert_with(HashMap::new);
+    let closed_candle = self.process_tick_in_builder(tick, timeframe, candle_start)?;
 
-      let builder = market_builders
-        .entry(timeframe)
-        .or_insert_with(|| CandleBuilder::new(tick.market_id.clone(), timeframe, candle_start));
-
-      // Check if we need to close the current candle
-      if builder.start_time != candle_start {
-        // Close the previous candle
-        let closed_candle = builder.clone().build(true, DataSource::WebSocketTick);
-        (Some(closed_candle), true)
-      } else {
-        // Just add tick to current candle
-        builder.add_tick(tick)?;
-        (None, false)
-      }
-    };
-
-    // Handle closed candle if any
-    if let Some(closed_candle) = closed_candle {
-      // Store in ring buffer
-      self.store_candle(closed_candle.clone()).await;
-
-      // Publish events
-      self.publish_candle_closed_event(&closed_candle).await;
-
-      // Update metrics
-      self.metrics.record_candle_closed(timeframe);
-
-      // Create new candle
-      if needs_new_candle {
-        let mut builders = self.builders.lock();
-        let market_builders = builders
-          .entry(tick.market_id.clone())
-          .or_insert_with(HashMap::new);
-        let builder = market_builders
-          .entry(timeframe)
-          .or_insert_with(|| CandleBuilder::new(tick.market_id.clone(), timeframe, candle_start));
-
-        // Start new candle
-        *builder = CandleBuilder::new(tick.market_id.clone(), timeframe, candle_start);
-
-        // Add the tick to new candle
-        builder.add_tick(tick)?;
-      }
-
-      return Ok(Some(closed_candle));
+    if let Some(candle) = closed_candle {
+      self
+        .handle_closed_candle(tick, timeframe, candle_start, &candle)
+        .await?;
+      return Ok(Some(candle));
     }
 
     self.metrics.record_tick_processed();
     Ok(None)
   }
 
-  /// Store a candle in the appropriate ring buffer
+  fn process_tick_in_builder(
+    &self,
+    tick: &Tick,
+    timeframe: TimeFrame,
+    candle_start: DateTime<Utc>,
+  ) -> Result<Option<Candle>, CandleError> {
+    let mut builders = self.builders.lock();
+    let builder = self.get_or_create_builder(&mut builders, tick, timeframe, candle_start);
+
+    if builder.start_time != candle_start {
+      let closed_candle = builder.clone().build(true, DataSource::WebSocketTick);
+      Ok(Some(closed_candle))
+    } else {
+      builder.add_tick(tick)?;
+      Ok(None)
+    }
+  }
+
+  fn get_or_create_builder<'a>(
+    &self,
+    builders: &'a mut HashMap<String, HashMap<TimeFrame, CandleBuilder>>,
+    tick: &Tick,
+    timeframe: TimeFrame,
+    candle_start: DateTime<Utc>,
+  ) -> &'a mut CandleBuilder {
+    let market_builders = Self::get_or_create_market_builders(builders, &tick.market_id);
+
+    market_builders
+      .entry(timeframe)
+      .or_insert_with(|| CandleBuilder::new(tick.market_id.clone(), timeframe, candle_start))
+  }
+
+  async fn handle_closed_candle(
+    &self,
+    tick: &Tick,
+    timeframe: TimeFrame,
+    candle_start: DateTime<Utc>,
+    closed_candle: &Candle,
+  ) -> Result<(), CandleError> {
+    self.store_candle(closed_candle.clone()).await;
+    self.publish_candle_closed_event(&closed_candle).await;
+    self.metrics.record_candle_closed(timeframe);
+    self.create_new_candle_with_tick(tick, timeframe, candle_start);
+    Ok(())
+  }
+
+  fn create_new_candle_with_tick(
+    &self,
+    tick: &Tick,
+    timeframe: TimeFrame,
+    candle_start: DateTime<Utc>,
+  ) -> Result<(), CandleError> {
+    let mut builders = self.builders.lock();
+    let market_builders = Self::get_or_create_market_builders(&mut builders, &tick.market_id);
+
+    let mut new_builder = CandleBuilder::new(tick.market_id.clone(), timeframe, candle_start);
+    new_builder.add_tick(tick)?;
+
+    market_builders.insert(timeframe, new_builder);
+    Ok(())
+  }
+
+  /// Store a candle in the appropriate ring buffer and database
   async fn store_candle(&self, candle: Candle) {
     info!(
       "STORING candle: market={}, timeframe={:?}, start={}, volume={}, ticks={}",
@@ -226,11 +269,15 @@ impl CandleStore {
     // Check if this exact candle is already stored to prevent duplicates
     let latest_candles = ring_buffer.get_latest(1);
     if let Some(existing_candle) = latest_candles.first() {
-      if existing_candle.start_time == candle.start_time &&
-         existing_candle.timeframe == candle.timeframe &&
-         existing_candle.market_id == candle.market_id {
-        info!("Candle already exists in ring buffer, skipping duplicate storage for {:?} at {}",
-          candle.timeframe, candle.start_time.format("%H:%M:%S"));
+      if existing_candle.start_time == candle.start_time
+        && existing_candle.timeframe == candle.timeframe
+        && existing_candle.market_id == candle.market_id
+      {
+        info!(
+          "Candle already exists in ring buffer, skipping duplicate storage for {:?} at {}",
+          candle.timeframe,
+          candle.start_time.format("%H:%M:%S")
+        );
         return;
       }
     }
@@ -238,7 +285,19 @@ impl CandleStore {
     ring_buffer.push(candle.clone());
     self.metrics.record_candle_stored();
 
-    info!("Successfully stored candle in ring buffer for {:?}", candle.timeframe);
+    // Also save to PostgreSQL if database is available
+    if let Some(database) = &self.database {
+      if let Err(e) = database.save_candle(&candle).await {
+        tracing::error!("Failed to save candle to database: {}", e);
+      } else {
+        tracing::debug!("Candle saved to PostgreSQL database");
+      }
+    }
+
+    info!(
+      "Successfully stored candle in ring buffer for {:?}",
+      candle.timeframe
+    );
   }
 
   /// Publish candle closed event to all publishers
@@ -268,10 +327,7 @@ impl CandleStore {
       {
         info!(
           "Successfully aggregated {} to {}: volume={}, ticks={}",
-          source_candle.timeframe,
-          target_timeframe,
-          aggregated.volume,
-          aggregated.tick_count
+          source_candle.timeframe, target_timeframe, aggregated.volume, aggregated.tick_count
         );
 
         // Store the aggregated candle first
@@ -291,7 +347,10 @@ impl CandleStore {
   }
 
   /// Create independent chain candles (M3 from M1; M30 from M15; H2 from H1)
-  async fn create_independent_chains(&self, source_candle: &Candle) -> Result<Vec<Candle>, CandleError> {
+  async fn create_independent_chains(
+    &self,
+    source_candle: &Candle,
+  ) -> Result<Vec<Candle>, CandleError> {
     let mut independent_candles = Vec::new();
 
     match source_candle.timeframe {
@@ -301,7 +360,10 @@ impl CandleStore {
           .aggregate_to_timeframe(source_candle, TimeFrame::M3)
           .await?
         {
-          info!("Created independent M3 candle: volume={}, ticks={}", m3_candle.volume, m3_candle.tick_count);
+          info!(
+            "Created independent M3 candle: volume={}, ticks={}",
+            m3_candle.volume, m3_candle.tick_count
+          );
           independent_candles.push(m3_candle);
         }
       }
@@ -311,7 +373,10 @@ impl CandleStore {
           .aggregate_to_timeframe(source_candle, TimeFrame::M30)
           .await?
         {
-          info!("Created independent M30 candle: volume={}, ticks={}", m30_candle.volume, m30_candle.tick_count);
+          info!(
+            "Created independent M30 candle: volume={}, ticks={}",
+            m30_candle.volume, m30_candle.tick_count
+          );
           independent_candles.push(m30_candle);
         }
       }
@@ -321,7 +386,10 @@ impl CandleStore {
           .aggregate_to_timeframe(source_candle, TimeFrame::H2)
           .await?
         {
-          info!("Created independent H2 candle: volume={}, ticks={}", h2_candle.volume, h2_candle.tick_count);
+          info!(
+            "Created independent H2 candle: volume={}, ticks={}",
+            h2_candle.volume, h2_candle.tick_count
+          );
           independent_candles.push(h2_candle);
         }
       }
@@ -344,12 +412,14 @@ impl CandleStore {
     let required_count = self.get_required_candle_count(source_candle.timeframe, target_timeframe);
 
     // Get source candles within the target timeframe range
-    let source_candles = self.get_candles_range(
-      &source_candle.market_id,
-      source_candle.timeframe,
-      target_start,
-      target_end
-    ).await;
+    let source_candles = self
+      .get_candles_range(
+        &source_candle.market_id,
+        source_candle.timeframe,
+        target_start,
+        target_end,
+      )
+      .await;
 
     info!(
       "{:?} aggregation check: market={}, target_start={}, target_end={}, found_candles={}, required={}",
@@ -362,8 +432,13 @@ impl CandleStore {
     );
 
     if source_candles.len() < required_count {
-      info!("Not enough {:?} candles for {:?} aggregation: found={}, required={}",
-        source_candle.timeframe, target_timeframe, source_candles.len(), required_count);
+      info!(
+        "Not enough {:?} candles for {:?} aggregation: found={}, required={}",
+        source_candle.timeframe,
+        target_timeframe,
+        source_candles.len(),
+        required_count
+      );
       return Ok(None);
     }
 
@@ -371,27 +446,37 @@ impl CandleStore {
     let mut filtered_candles: Vec<Candle> = source_candles
       .into_iter()
       .filter(|candle| {
-        candle.start_time >= target_start
-          && candle.start_time < target_end
-          && candle.is_closed
+        candle.start_time >= target_start && candle.start_time < target_end && candle.is_closed
       })
       .collect();
 
     if filtered_candles.len() < required_count {
-      info!("Not enough closed candles after filtering: found={}, required={}",
-        filtered_candles.len(), required_count);
+      info!(
+        "Not enough closed candles after filtering: found={}, required={}",
+        filtered_candles.len(),
+        required_count
+      );
       return Ok(None);
     }
 
     // Sort by start time to ensure correct OHLC calculation
     filtered_candles.sort_by_key(|candle| candle.start_time);
 
-    info!("Creating {:?} candle from {} {:?} candles",
-      target_timeframe, filtered_candles.len(), source_candle.timeframe);
+    info!(
+      "Creating {:?} candle from {} {:?} candles",
+      target_timeframe,
+      filtered_candles.len(),
+      source_candle.timeframe
+    );
 
     // Create aggregated candle from filtered candles
     let aggregated_candle = self
-      .create_aggregated_candle(&filtered_candles, target_timeframe, target_start, target_end)
+      .create_aggregated_candle(
+        &filtered_candles,
+        target_timeframe,
+        target_start,
+        target_end,
+      )
       .await?;
 
     Ok(Some(aggregated_candle))
@@ -403,7 +488,6 @@ impl CandleStore {
     source_candle: &Candle,
     target_timeframe: TimeFrame,
   ) -> Result<Option<Candle>, CandleError> {
-
     // Calculate target candle timerange for current window
     let target_start = target_timeframe.round_timestamp(source_candle.start_time);
     let target_end = target_start + Duration::seconds(target_timeframe.duration_secs());
@@ -414,36 +498,28 @@ impl CandleStore {
     let prev_target_end = target_start;
 
     // Check if previous window is complete
-    if let Some(prev_candle) = self.check_and_create_aggregated_candle(
-      source_candle, target_timeframe, prev_target_start, prev_target_end
-    ).await? {
+    if let Some(prev_candle) = self
+      .check_and_create_aggregated_candle(
+        source_candle,
+        target_timeframe,
+        prev_target_start,
+        prev_target_end,
+      )
+      .await?
+    {
       return Ok(Some(prev_candle));
     }
 
     // Check current window using helper method
-    if let Some(aggregated_candle) = self.check_and_create_aggregated_candle(
-      source_candle, target_timeframe, target_start, target_end
-    ).await? {
+    if let Some(aggregated_candle) = self
+      .check_and_create_aggregated_candle(source_candle, target_timeframe, target_start, target_end)
+      .await?
+    {
       return Ok(Some(aggregated_candle));
     }
 
     // If we reach here, no aggregation was possible
     Ok(None)
-  }
-
-  /// Check if a candle should be force closed based on time
-  fn should_force_close_candle(
-    &self,
-    builder: &CandleBuilder,
-    target_timeframe: TimeFrame,
-    current_time: DateTime<Utc>,
-  ) -> bool {
-    let candle_duration = Duration::seconds(target_timeframe.duration_secs());
-    let expected_end_time = builder.start_time + candle_duration;
-
-    // Force close if current time has passed the expected end time
-    // and we have some data in the builder
-    current_time >= expected_end_time && builder.tick_count > 0
   }
 
   /// Start periodic candle closure task (should be called on Arc<CandleStore>)
@@ -496,9 +572,7 @@ impl CandleStore {
           if now >= close_time && builder.tick_count > 0 {
             // Validate builder state before closing
             if builder.open > Some(0.0) && builder.volume >= 0.0 {
-              let closed_candle = builder
-                .clone()
-                .build(true, DataSource::WebSocketTick); // Correct data source for tick-based candles
+              let closed_candle = builder.clone().build(true, DataSource::WebSocketTick); // Correct data source for tick-based candles
 
               closed_candles.push((market_id.clone(), *timeframe, closed_candle));
 
@@ -559,7 +633,7 @@ impl CandleStore {
               // Note: Storage will be handled by the main process_tick flow
               // to avoid duplicate storage of the same aggregated candle
             }
-          },
+          }
           Err(e) => {
             tracing::error!("Failed to aggregate force-closed candle: {}", e);
           }
@@ -729,6 +803,123 @@ impl CandleStore {
     self.metrics.clone()
   }
 
+  /// Load candles from database (fallback when not in memory)
+  pub async fn load_candles_from_database(
+    &self,
+    market_id: &str,
+    timeframe: TimeFrame,
+    count: usize,
+  ) -> Vec<Candle> {
+    if let Some(database) = &self.database {
+      match database
+        .load_latest_candles(market_id, timeframe, count as i64)
+        .await
+      {
+        Ok(candles) => {
+          tracing::info!(
+            "Loaded {} candles from database for {}/{:?}",
+            candles.len(),
+            market_id,
+            timeframe
+          );
+          candles
+        }
+        Err(e) => {
+          tracing::error!("Failed to load candles from database: {}", e);
+          Vec::new()
+        }
+      }
+    } else {
+      Vec::new()
+    }
+  }
+
+  /// Preload recent candles from database into memory
+  pub async fn preload_from_database(
+    &self,
+    market_id: &str,
+    timeframe: TimeFrame,
+    count: usize,
+  ) -> Result<(), CandleError> {
+    if let Some(database) = &self.database {
+      let candles = database
+        .load_latest_candles(market_id, timeframe, count as i64)
+        .await
+        .map_err(|e| CandleError::StorageError(e.to_string()))?;
+
+      let buffer_size = self
+        .config
+        .buffer_sizes
+        .get(&timeframe)
+        .copied()
+        .unwrap_or(1000);
+      let mut candles_map = self.candles.write().await;
+      let market_candles = candles_map
+        .entry(market_id.to_string())
+        .or_insert_with(HashMap::new);
+
+      let ring_buffer = market_candles
+        .entry(timeframe)
+        .or_insert_with(|| CandleRingBuffer::new(buffer_size));
+
+      // Add candles to ring buffer
+      for candle in candles {
+        ring_buffer.push(candle);
+      }
+
+      tracing::info!(
+        "Preloaded {} candles from database for {}/{:?}",
+        ring_buffer.len(),
+        market_id,
+        timeframe
+      );
+    }
+
+    Ok(())
+  }
+
+  /// Batch save multiple candles to database
+  pub async fn save_candles_batch_to_database(
+    &self,
+    candles: &[Candle],
+  ) -> Result<(), CandleError> {
+    if let Some(database) = &self.database {
+      database
+        .save_candles_batch(candles)
+        .await
+        .map_err(|e| CandleError::StorageError(e.to_string()))?;
+
+      tracing::info!("Batch saved {} candles to database", candles.len());
+    }
+
+    Ok(())
+  }
+
+  /// Clean up old database records
+  pub async fn cleanup_database(
+    &self,
+    market_id: &str,
+    timeframe: TimeFrame,
+    before: DateTime<Utc>,
+  ) -> Result<u64, CandleError> {
+    if let Some(database) = &self.database {
+      let deleted = database
+        .cleanup_old_candles(market_id, timeframe, before)
+        .await
+        .map_err(|e| CandleError::StorageError(e.to_string()))?;
+
+      tracing::info!(
+        "Cleaned up {} old candles from database for {}/{:?}",
+        deleted,
+        market_id,
+        timeframe
+      );
+      Ok(deleted)
+    } else {
+      Ok(0)
+    }
+  }
+
   /// Get required number of source candles for target timeframe
   fn get_required_candle_count(
     &self,
@@ -737,32 +928,21 @@ impl CandleStore {
   ) -> usize {
     match (source_timeframe, target_timeframe) {
       // Primary Trading Chain (Single Path)
-      (TimeFrame::M1, TimeFrame::M5) => 5,   // 5 M1 -> 1 M5
-      (TimeFrame::M5, TimeFrame::M15) => 3,  // 3 M5 -> 1 M15
-      (TimeFrame::M15, TimeFrame::H1) => 4,  // 4 M15 -> 1 H1
-      (TimeFrame::H1, TimeFrame::H4) => 4,   // 4 H1 -> 1 H4
-      (TimeFrame::H4, TimeFrame::D1) => 6,   // 6 H4 -> 1 D1
-      (TimeFrame::D1, TimeFrame::W1) => 7,   // 7 D1 -> 1 W1
-      (TimeFrame::W1, TimeFrame::MN1) => 4,  // 4 W1 -> 1 MN1
+      (TimeFrame::M1, TimeFrame::M5) => 5,  // 5 M1 -> 1 M5
+      (TimeFrame::M5, TimeFrame::M15) => 3, // 3 M5 -> 1 M15
+      (TimeFrame::M15, TimeFrame::H1) => 4, // 4 M15 -> 1 H1
+      (TimeFrame::H1, TimeFrame::H4) => 4,  // 4 H1 -> 1 H4
+      (TimeFrame::H4, TimeFrame::D1) => 6,  // 6 H4 -> 1 D1
+      (TimeFrame::D1, TimeFrame::W1) => 7,  // 7 D1 -> 1 W1
+      (TimeFrame::W1, TimeFrame::MN1) => 4, // 4 W1 -> 1 MN1
 
       // Independent Chains (No conflicts)
-      (TimeFrame::M1, TimeFrame::M3) => 3,     // 3 M1 -> 1 M3 (scalping)
-      (TimeFrame::M15, TimeFrame::M30) => 2,   // 2 M15 -> 1 M30 (swing trading)
-      (TimeFrame::H1, TimeFrame::H2) => 2,     // 2 H1 -> 1 H2 (alt hours)
+      (TimeFrame::M1, TimeFrame::M3) => 3, // 3 M1 -> 1 M3 (scalping)
+      (TimeFrame::M15, TimeFrame::M30) => 2, // 2 M15 -> 1 M30 (swing trading)
+      (TimeFrame::H1, TimeFrame::H2) => 2, // 2 H1 -> 1 H2 (alt hours)
 
-      _ => 1,                                // Default case
+      _ => 1, // Default case
     }
-  }
-
-  /// Add candle to aggregation buffer for later processing
-  async fn add_to_aggregation_buffer(
-    &self,
-    _candle: &Candle,
-    _target_timeframe: TimeFrame,
-  ) -> Result<(), CandleError> {
-    // For now, just return Ok - we'll implement this later if needed
-    // This is a placeholder for future implementation
-    Ok(())
   }
 
   /// Create aggregated candle from source candles
@@ -824,6 +1004,8 @@ impl CandleStore {
     Ok(Candle {
       market_id,
       timeframe: target_timeframe,
+      start_timestamp: target_start.timestamp(),
+      end_timestamp: target_end.timestamp(),
       start_time: target_start,
       end_time: target_end,
       open,
@@ -838,13 +1020,14 @@ impl CandleStore {
       spread_max: 0.0,
       is_closed: true,
       metadata: CandleMetadata {
+        created_timestamp: Utc::now().timestamp(),
         created_at: Utc::now(),
         source: DataSource::Aggregated(sorted_candles[0].timeframe),
         quality_score: 1.0,
         gap_detected: false,
         volatility_z_score: None,
+        ws_sequence: None,
       },
     })
   }
 }
-
