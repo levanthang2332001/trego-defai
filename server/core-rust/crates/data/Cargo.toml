@@ -32,5 +32,8 @@ async-trait = "0.1"
 # Error handling
 anyhow = "1.0"
 
+# Database
+sqlx = { version = "0.7", features = ["runtime-tokio-rustls", "postgres", "chrono", "uuid", "json"] }
+
 # Local dependencies
 types = { path = "../types" }

@@ -39,6 +39,12 @@ url = "2.4"
 # Date and time
 chrono = { version = "0.4", features = ["serde"] }
 
+# Database
+sqlx = { version = "0.7", features = ["runtime-tokio-rustls", "postgres", "chrono", "uuid", "json", "migrate"] }
+
+# Environment variables
+dotenvy = "0.15"
+
 # Local dependencies
 data = { path = "crates/data" }
 types = { path = "crates/types" }
