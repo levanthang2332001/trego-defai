@@ -15,6 +15,9 @@ use data::{
   trading::{MarketMaker, ParamsValidator, TradingState},
 };
 
+mod database;
+use database::{DatabaseManager, Token};
+
 use types::trading_core_server::{TradingCore, TradingCoreServer};
 use types::*;
 
@@ -75,6 +78,7 @@ pub struct TradingCoreService {
   market_data: Arc<MarketDataService>,
   trading_state: Arc<TradingState>,
   market_maker: Arc<MarketMaker>,
+  database_manager: Option<Arc<DatabaseManager>>,
   orderbook_manager: Option<WebSocketManager>,
   trades_manager: Option<WebSocketManager>,
 }
@@ -98,9 +102,42 @@ impl TradingCoreService {
       market_data: Arc::new(MarketDataService::new(candle_store)),
       trading_state,
       market_maker,
+      database_manager: None,
       orderbook_manager: None,
       trades_manager: None,
     }
+  }
+
+  pub async fn new_with_database(database_url: &str) -> Result<Self> {
+    // Create database manager with verification
+    let database_manager = Arc::new(DatabaseManager::new(database_url).await?);
+
+    // Note: Migrations should be run separately using sqlx-cli
+    // Run: sqlx migrate run --source ./src/database/migrations
+
+    let config = CandleStoreConfig::default();
+    let candle_db = Arc::new(database_manager.candle_db().clone());
+    let candle_store = Arc::new(CandleStore::new_with_database(config, candle_db.clone()));
+    let trading_state = Arc::new(TradingState::new());
+    let market_maker = Arc::new(MarketMaker::new(trading_state.clone()));
+
+    // Start periodic candle closure task
+    CandleStore::start_periodic_closure(candle_store.clone());
+
+    Ok(Self {
+      state: Arc::new(RwLock::new(EngineState::default())),
+      ws_url: MAINNET_WS_URL.to_string(),
+      candle_store: candle_store.clone(),
+      market_data: Arc::new(MarketDataService::new_with_database(
+        candle_store,
+        candle_db,
+      )),
+      trading_state,
+      market_maker,
+      database_manager: Some(database_manager),
+      orderbook_manager: None,
+      trades_manager: None,
+    })
   }
 
   pub async fn update_market_data(&self, market_id: &str, bid: f64, ask: f64, volume: f64) {
@@ -142,8 +179,13 @@ impl TradingCoreService {
       market_id: market_id.to_string(),
     };
 
-    info!("Starting persistent orderbook WebSocket connection for market {}", market_id);
-    orderbook_manager.start_persistent_connection(orderbook_request).await;
+    info!(
+      "Starting persistent orderbook WebSocket connection for market {}",
+      market_id
+    );
+    orderbook_manager
+      .start_persistent_connection(orderbook_request)
+      .await;
 
     // Start persistent trades connection
     let trades_request = WsRequest {
@@ -151,11 +193,21 @@ impl TradingCoreService {
       market_id: market_id.to_string(),
     };
 
-    info!("Starting persistent trades WebSocket connection for market {}", market_id);
-    trades_manager.start_persistent_connection(trades_request).await;
+    info!(
+      "Starting persistent trades WebSocket connection for market {}",
+      market_id
+    );
+    trades_manager
+      .start_persistent_connection(trades_request)
+      .await;
 
     info!("Market data connections initialized with automatic reconnection");
     Ok(())
+  }
+
+  /// Get database manager reference
+  pub fn database_manager(&self) -> Option<&Arc<DatabaseManager>> {
+    self.database_manager.as_ref()
   }
 }
 
@@ -366,16 +418,60 @@ impl TradingCore for TradingCoreService {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+  // Load environment variables from .env file
+  if let Err(e) = dotenvy::dotenv() {
+    tracing::warn!("Failed to load .env file: {}", e);
+  }
+
   // Initialize tracing
   tracing_subscriber::fmt::init();
 
   let addr = "0.0.0.0:50051".parse()?;
-  let trading_core = TradingCoreService::new();
 
-  // Connect to market data for BTC
-  info!("Connecting to market data...");
-  if let Err(e) = trading_core.connect_market_data("15").await {
-    error!("Failed to connect to market data: {}", e);
+  // Try to get database URL from environment
+  let database_url = std::env::var("DATABASE_URL").ok();
+
+  // Display supported tokens
+  info!("🪙 Supported Tokens:");
+  for token in Token::all_tokens() {
+    info!(
+      "   {} ({}): {} - {} decimals",
+      token.symbol(),
+      token.market_id(),
+      token.full_name(),
+      token.decimals()
+    );
+  }
+
+  let trading_core = match database_url {
+    Some(url) => {
+      info!("🗄️  Initializing with PostgreSQL database");
+      TradingCoreService::new_with_database(&url).await?
+    }
+    None => {
+      info!("⚠️  No DATABASE_URL found, initializing without database persistence");
+      info!("   Set DATABASE_URL to enable persistent candle storage");
+      TradingCoreService::new()
+    }
+  };
+
+  // Connect to market data for all supported tokens
+  info!("📡 Connecting to market data for all tokens...");
+  for token in Token::all_tokens() {
+    info!(
+      "   Connecting to {} ({})",
+      token.symbol(),
+      token.market_id()
+    );
+    if let Err(e) = trading_core.connect_market_data(token.market_id()).await {
+      error!(
+        "Failed to connect to market data for {}: {}",
+        token.symbol(),
+        e
+      );
+    } else {
+      info!("   ✅ {} connected", token.symbol());
+    }
   }
 
   info!("TradingCore gRPC server starting on {}", addr);
