@@ -22,7 +22,7 @@ impl MarketMaker {
     let position = self.get_position(market_id).await?;
 
     // Calculate optimal quotes using Avellaneda-Stoikov formula
-    let gamma = params.risk_per_trade;
+    let _gamma = params.risk_per_trade;
     let k = params.k_factor;
 
     let spread = params.min_spread.max(k * position.abs());
