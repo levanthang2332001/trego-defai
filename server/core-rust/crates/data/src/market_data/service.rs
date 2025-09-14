@@ -4,9 +4,11 @@ use super::{
   types::{OrderbookLevel, Trade, WsResponse},
 };
 use crate::candles::{
+  database::CandleDatabase,
   store::CandleStore,
-  types::{Tick, TradeSide},
+  types::{Tick, TradeSide, WebSocketCandle},
 };
+use sqlx::Row;
 use std::sync::Arc;
 
 #[derive(Debug)]
@@ -14,6 +16,7 @@ pub struct MarketDataService {
   orderbook_store: Arc<OrderbookStore>,
   trade_store: Arc<TradeStore>,
   candle_store: Arc<CandleStore>,
+  database: Option<Arc<CandleDatabase>>,
 }
 
 impl MarketDataService {
@@ -22,6 +25,16 @@ impl MarketDataService {
       orderbook_store: Arc::new(OrderbookStore::new()),
       trade_store: Arc::new(TradeStore::new()),
       candle_store,
+      database: None,
+    }
+  }
+
+  pub fn new_with_database(candle_store: Arc<CandleStore>, database: Arc<CandleDatabase>) -> Self {
+    Self {
+      orderbook_store: Arc::new(OrderbookStore::new()),
+      trade_store: Arc::new(TradeStore::new()),
+      candle_store,
+      database: Some(database),
     }
   }
 
@@ -99,11 +112,15 @@ impl MarketDataService {
     // Update trade store
     self.trade_store.add_trade(trade.clone()).await;
 
-    // Create and process tick
+    // Save as WebSocket candle directly to database (primary method)
+    if let Some(database) = &self.database {
+      self.save_trade_as_websocket_candle(database, &trade).await;
+    }
+
+    // Also process with old tick system for backward compatibility
+    let datetime = chrono::DateTime::from_timestamp(trade.timestamp, 0).unwrap_or_default();
     let tick = Tick {
-      timestamp: chrono::DateTime::from_timestamp(trade.timestamp, 0)
-        .unwrap()
-        .into(),
+      timestamp: datetime,
       market_id: trade.market_id.clone(),
       price: trade.price_as_f64(),
       volume: trade.size_as_f64(),
@@ -111,8 +128,8 @@ impl MarketDataService {
       ask: None,
       spread: None,
       side: Some(match trade.order_type {
-        3 | 5 => TradeSide::Buy,  // Market/Limit Buy
-        4 | 6 => TradeSide::Sell, // Market/Limit Sell
+        3 | 5 => TradeSide::Buy,
+        4 | 6 => TradeSide::Sell,
         _ => TradeSide::Unknown,
       }),
       sequence: None,
@@ -120,6 +137,83 @@ impl MarketDataService {
 
     if let Err(e) = self.candle_store.process_tick(&tick).await {
       tracing::error!("Failed to process trade tick: {}", e);
+    }
+  }
+
+  /// Convert trade to WebSocket candle and save directly to database
+  async fn save_trade_as_websocket_candle(&self, database: &CandleDatabase, trade: &Trade) {
+    // Round timestamp to 1-minute intervals for M1 candles
+    let minute_timestamp = (trade.timestamp / 60) * 60;
+
+    // Try to get existing candle for this minute
+    let existing_candle = sqlx::query_scalar::<_, Option<i64>>(
+      "SELECT id FROM ws_candles WHERE market_id = $1 AND timeframe = '1m' AND timestamp_start = $2"
+    )
+    .bind(&trade.market_id)
+    .bind(minute_timestamp)
+    .fetch_optional(database.pool())
+    .await;
+
+    match existing_candle {
+      Ok(Some(_)) => {
+        // Update existing candle with new trade data
+        if let Err(e) = sqlx::query(
+          r#"
+          UPDATE ws_candles SET
+            high_price = GREATEST(high_price, $3),
+            low_price = LEAST(low_price, $3),
+            close_price = $3,
+            volume = volume + $4,
+            trade_count = trade_count + 1,
+            timestamp_end = $5
+          WHERE market_id = $1 AND timeframe = '1m' AND timestamp_start = $2
+          "#,
+        )
+        .bind(&trade.market_id)
+        .bind(minute_timestamp)
+        .bind(trade.price_as_f64())
+        .bind(trade.size_as_f64())
+        .bind(trade.timestamp)
+        .execute(database.pool())
+        .await
+        {
+          tracing::error!("Failed to update WebSocket candle: {}", e);
+        } else {
+          tracing::debug!(
+            "Updated WebSocket M1 candle for market {} at timestamp {}",
+            trade.market_id,
+            minute_timestamp
+          );
+        }
+      }
+      Ok(None) => {
+        // Create new WebSocket candle
+        let ws_candle = WebSocketCandle::from_websocket_data(
+          trade.market_id.clone(),
+          "1m".to_string(),
+          minute_timestamp,
+          trade.price_as_f64(), // open = first trade price
+          trade.price_as_f64(), // high = first trade price
+          trade.price_as_f64(), // low = first trade price
+          trade.price_as_f64(), // close = first trade price
+          trade.size_as_f64(),  // volume = first trade size
+          Some(1),              // trade_count = 1
+          None,                 // sequence from trade if available
+        );
+
+        if let Err(e) = database.save_websocket_candle(&ws_candle).await {
+          tracing::error!("Failed to save new WebSocket candle: {}", e);
+        } else {
+          tracing::info!(
+            "💾 Created new WebSocket M1 candle for {} at timestamp {}",
+            trade.market_id,
+            minute_timestamp
+          );
+        }
+      }
+      Err(e) => {
+        tracing::error!("Failed to check existing WebSocket candle: {}", e);
+      }
     }
   }
 

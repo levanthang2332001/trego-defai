@@ -1,5 +1,5 @@
 use super::types::{MarketVolume, Trade, WsRequest, WsTopics};
-use chrono::{DateTime, Duration, Utc};
+use chrono::Utc;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
