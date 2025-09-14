@@ -14,7 +14,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     "PROTOC",
     "C:/Program Files/protoc-32.0-win64/bin/protoc.exe",
   );
-  let out_dir = std::env::var("OUT_DIR").unwrap();
+  let _out_dir = std::env::var("OUT_DIR").unwrap();
   tonic_build::configure()
     .build_server(true)
     .build_client(true)
